@@ -1,1 +1,7 @@
-rewui
+streamlit
+pandas
+numpy
+plotly
+scipy
+numpy-financial
+
