@@ -1,21 +1,30 @@
-import io
-import json
-import zipfile
-import calendar
-import numpy as np
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-from scipy.stats import norm
-import numpy_financial as npf
 import streamlit as st
+import pandas as pd
+import datetime
+import calendar
 
-# Configuração da página
-st.set_page_config(
-    page_title="Fluxo Financeiro Profissional", page_icon="💰", layout="wide"
-)
+st.set_page_config(page_title="Fluxo Financeiro Profissional", page_icon="💰", layout="wide")
+
+# ==================== ESTADOS DA SESSÃO ====================
+if "lancamentos" not in st.session_state:
+    st.session_state.lancamentos = pd.DataFrame(columns=[
+        "Tipo", "Conta", "Conta Destino", "Categoria", "Descrição", "Valor", "Data", "Parcelas", "Modo Valor", "Status", "Cenario"
+    ])
+
+if "categorias" not in st.session_state:
+    st.session_state.categorias = ["Alimentação", "Transporte", "Moradia", "Salário", "Lazer", "Saúde", "Educação", "Fatura Cartão"]
+
+if "contas" not in st.session_state:
+    st.session_state.contas = ["Conta Corrente", "Carteira", "Cartão de Crédito", "Poupança", "Nubank", "Inter"]
+
+if "cartoes" not in st.session_state:
+    st.session_state.cartoes = [
+        {"Nome": "Nubank", "Limite": 5000.0, "Fechamento": 5, "Vencimento": 12},
+        {"Nome": "Inter", "Limite": 3000.0, "Fechamento": 10, "Vencimento": 17},
+    ]
 
 # ==================== NAVEGAÇÃO LATERAL ====================
+st.sidebar.title("💰 Fluxo Financeiro")
 aba = st.sidebar.radio(
     "Navegação",
     [
@@ -35,127 +44,120 @@ aba = st.sidebar.radio(
     ],
 )
 
-# ==================== ESTADOS DA SESSÃO ====================
-COLUNAS_LANC = [
-    "Tipo",
-    "Conta",
-    "Conta Destino",
-    "Categoria",
-    "Descrição",
-    "Valor",
-    "Data",
-    "Parcelas",
-    "Modo Valor",
-    "Status",
-    "Cenario",
-]
-
-if "lancamentos" not in st.session_state:
-    st.session_state.lancamentos = pd.DataFrame(columns=COLUNAS_LANC)
-
-if not st.session_state.lancamentos.empty and "Status" not in st.session_state.lancamentos.columns:
-    st.session_state.lancamentos["Status"] = "Efetivado"
-
-if not st.session_state.lancamentos.empty and "Cenario" not in st.session_state.lancamentos.columns:
-    st.session_state.lancamentos["Cenario"] = "Efetivado"
-
-if "categorias" not in st.session_state:
-    st.session_state.categorias = [
-        "Alimentação",
-        "Transporte",
-        "Moradia",
-        "Salário",
-        "Lazer",
-    ]
-
-if "contas" not in st.session_state:
-    st.session_state.contas = [
-        "Conta Corrente",
-        "Carteira",
-        "Cartão de Crédito",
-        "Poupança",
-    ]
-
-if "cartoes" not in st.session_state:
-    st.session_state.cartoes = [
-        {
-            "Nome": "Nubank",
-            "Limite": 5000.0,
-            "Fechamento": 5,
-            "Vencimento": 12,
-        },
-        {
-            "Nome": "Inter",
-            "Limite": 3000.0,
-            "Fechamento": 10,
-            "Vencimento": 17,
-        },
-    ]
-
-# ==================== FUNÇÕES AUXILIARES ====================
-PREFIXO_AUTO = "[AUTO] Fatura "
-CATEGORIA_FATURA = "Fatura Cartão"
-
-def garantir_colunas(df):
-    if "Status" not in df.columns:
-        df["Status"] = "Efetivado"
-    df["Status"] = df["Status"].fillna("Efetivado")
-    if "Cenario" not in df.columns:
-        df["Cenario"] = df["Status"].apply(lambda s: "Budget" if s == "Orçado" else "Efetivado")
-    df["Cenario"] = df["Cenario"].fillna("Efetivado")
-    return df
-
-def _data_segura(ano, mes, dia):
-    ultimo = calendar.monthrange(ano, mes)[1]
-    return pd.Timestamp(year=ano, month=mes, day=min(dia, ultimo))
-
-def vencimento_da_fatura(data_compra, fechamento, vencimento):
-    d = pd.to_datetime(data_compra)
-    ref = pd.Timestamp(d.year, d.month, 1)
-    if d.day > fechamento:
-        ref += pd.DateOffset(months=1)
-    if vencimento <= fechamento:
-        ref += pd.DateOffset(months=1)
-    return _data_segura(ref.year, ref.month, int(vencimento)).date()
-
-def sincronizar_budget_cartao(nome_cartao=None):
-    df = st.session_state.lancamentos.copy()
-    if df.empty:
-        return
-    df = garantir_colunas(df)
-    if CATEGORIA_FATURA not in st.session_state.categorias:
-        st.session_state.categorias.append(CATEGORIA_FATURA)
-
-    cartoes = [c for c in st.session_state.cartoes if nome_cartao is None or c["Nome"] == nome_cartao]
-    novos = []
-    for c in cartoes:
-        nome = c["Nome"]
-        prefixo = f"{PREFIXO_AUTO}{nome} |"
-        eh_auto = df["Descrição"].astype(str).str.startswith(prefixo)
-        df = df[~eh_auto]
-
-        gastos = df[(df["Conta"] == nome) & (df["Tipo"] == "Despesa") & (df["Status"] == "Efetivado")].copy()
-        if gastos.empty:
-            continue
-        gastos["Valor"] = pd.to_numeric(gastos["Valor"], errors="coerce").fillna(0.0)
-        gastos["Venc"] = gastos["Data"].apply(lambda x: vencimento_da_fatura(x, c["Fechamento"], c["Vencimento"]))
-        pagos = pd.to_numeric(df[(df["Conta Destino"] == nome) & (df["Tipo"] == "Transferência") & (df["Status"] == "Efetivado")]["Valor"], errors="coerce").fillna(0.0).sum()
-        restante = float(pagos)
-
-        for venc, total in sorted(gastos.groupby("Venc")["Valor"].sum().items(), key=lambda x: x[0]):
-            total = float(total)
-            paga = restante >= total - 0.005
-            if paga:
-                restante -= total
-            descricao_fatura = f"{prefixo} {pd.Timestamp(venc).strftime('%Y-%m')}"
-            if paga:
-                descricao_fatura += " ✅ Paga"
-            novos.append(["Despesa", nome, "-", CATEGORIA_FATURA, descricao_fatura, total, venc, "Única", "Integral", "Efetivado" if paga else "Orçado", "Efetivado" if paga else "Budget"])
-
-    if novos:
-        df_novos = pd.DataFrame(novos, columns=COLUNAS_LANC)
-        df = pd.concat([df, df_novos], ignore_index=True)
-    st.session_state.lancamentos = df.reset_index(drop=True)
-
 st.title(f"Aba: {aba}")
-st.write("Aplicativo executando com sucesso.")
+
+df_atual = st.session_state.lancamentos
+
+# ==================== Roteamento das 13 Abas ====================
+
+if aba == "Sophisticated Graphics":
+    st.subheader("Painel Gráfico Avançado & Tendências")
+    if df_atual.empty:
+        st.info("Cadastre dados na aba **Cadastro** para visualizar os gráficos analíticos.")
+    else:
+        st.bar_chart(df_atual, x="Data", y="Valor")
+
+elif aba == "Graphics":
+    st.subheader("Gráficos Executivos e Indicadores Reativos")
+    if df_atual.empty:
+        st.warning("Nenhum dado encontrado para gerar os gráficos.")
+    else:
+        st.line_chart(df_atual, x="Data", y="Valor")
+
+elif aba == "KPIs":
+    st.subheader("Central de KPIs e Resiliência Financeira")
+    total_rec = df_atual[df_atual["Tipo"] == "Receita"]["Valor"].sum() if not df_atual.empty else 0
+    total_desp = df_atual[df_atual["Tipo"] == "Despesa"]["Valor"].sum() if not df_atual.empty else 0
+    saldo = total_rec - total_desp
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Receitas Totais", f"R$ {total_rec:,.2f}")
+    col2.metric("Despesas Totais", f"R$ {total_desp:,.2f}")
+    col3.metric("Saldo Líquido", f"R$ {saldo:,.2f}")
+
+elif aba == "Dashboard":
+    st.subheader("Dashboard Orçamentário e Budget vs. Realizado")
+    if df_atual.empty:
+        st.info("O dashboard está vazio. Insira transações para começar.")
+    else:
+        st.dataframe(df_atual, use_container_width=True)
+
+elif aba == "Statistics":
+    st.subheader("Estatísticas Descritivas e Curva de Probabilidade")
+    st.write("Análise estatística baseada no histórico de lançamentos cadastrados.")
+    if not df_atual.empty:
+        st.write(df_atual.describe())
+
+elif aba == "Statistic 2":
+    st.subheader("Modelagem de Risco e Econometria Avançada")
+    st.write("Ferramentas quantitativas, Value at Risk (VaR) e testes de estresse patrimonial.")
+
+elif aba == "Financial Analysis":
+    st.subheader("Financial Analysis (VPL, TIR e PMT)")
+    st.write("Simuladores de engenharia financeira e modelagem corporativa.")
+
+elif aba == "🤖 IA & Assistant":
+    st.subheader("Central de Inteligência Artificial & Assistente Gemini")
+    st.text_input("Faça uma pergunta sobre seus gastos ao assistente:")
+
+elif aba == "Lançamentos":
+    st.subheader("Auditoria e Consulta de Lançamentos")
+    if df_atual.empty:
+        st.warning("Nenhum lançamento registrado.")
+    else:
+        st.dataframe(df_atual, use_container_width=True)
+
+elif aba == "Cadastro":
+    st.subheader("Registrar Nova Movimentação")
+    with st.form("form_cadastro_geral"):
+        tipo = st.selectbox("Tipo", ["Despesa", "Receita", "Transferência"])
+        conta = st.selectbox("Conta / Origem", st.session_state.contas)
+        categoria = st.selectbox("Categoria", st.session_state.categorias)
+        descricao = st.text_input("Descrição")
+        valor = st.number_input("Valor (R$)", min_value=0.01, step=10.0)
+        data = st.date_input("Data do Lançamento", datetime.date.today())
+        status = st.selectbox("Status", ["Efetivado", "Orçado"])
+        
+        submitted = st.form_submit_button("Salvar no Sistema")
+        
+        if submitted:
+            if not descricao.strip():
+                st.error("Informe uma descrição válida.")
+            else:
+                novo_registro = pd.DataFrame([{
+                    "Tipo": tipo,
+                    "Conta": conta,
+                    "Conta Destino": "-",
+                    "Categoria": categoria,
+                    "Descrição": descricao,
+                    "Valor": valor,
+                    "Data": str(data),
+                    "Parcelas": "Única",
+                    "Modo Valor": "Integral",
+                    "Status": status,
+                    "Cenário": "Budget" if status == "Orçado" else "Efetivado"
+                }])
+                st.session_state.lancamentos = pd.concat([st.session_state.lancamentos, novo_registro], ignore_index=True)
+                st.success("Lançamento cadastrado com sucesso!")
+
+elif aba == "Cadastro de Categorias e Contas":
+    st.subheader("Gerenciar Centros de Custo e Contas")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.write("Categorias Atuais:", st.session_state.categorias)
+    with col2:
+        st.write("Contas Atuais:", st.session_state.contas)
+
+elif aba == "Cartões de Crédito":
+    st.subheader("Gestão de Faturas e Limites de Cartão")
+    for c in st.session_state.cartoes:
+        st.write(f"**Cartão:** {c['Nome']} | **Limite:** R$ {c['Limite']:,.2f} | **Fechamento:** Dia {c['Fechamento']} | **Vencimento:** Dia {c['Vencimento']}")
+
+elif aba == "Backup & Segurança":
+    st.subheader("Backup, Exportação e Importação de Dados")
+    st.write("Faça o download do seu histórico em formato JSON ou CSV ou limpe os registros locais.")
+    if st.button("Restaurar Dados Padrão"):
+        st.session_state.lancamentos = pd.DataFrame(columns=[
+            "Tipo", "Conta", "Conta Destino", "Categoria", "Descrição", "Valor", "Data", "Parcelas", "Modo Valor", "Status", "Cenario"
+        ])
+        st.success("Dados redefinidos com sucesso!")
